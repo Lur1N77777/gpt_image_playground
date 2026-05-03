@@ -1,3 +1,8 @@
 node_modules/
 dist/
 dev-proxy.config.json
+.wrangler/
+.dev.vars
+.env
+.env.local
+*.log

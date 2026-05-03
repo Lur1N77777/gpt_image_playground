@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { useStore, getCachedImage, ensureImageCached } from '../store'
+import { createMaskPreviewDataUrl } from '../lib/canvasImage'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 
 const MIN_SCALE = 1
@@ -13,7 +14,12 @@ export default function Lightbox() {
   const lightboxImageId = useStore((s) => s.lightboxImageId)
   const lightboxImageList = useStore((s) => s.lightboxImageList)
   const setLightboxImageId = useStore((s) => s.setLightboxImageId)
+  const imageCacheRevision = useStore((s) => s.imageCacheRevision)
+  const maskDraft = useStore((s) => s.maskDraft)
+  const tasks = useStore((s) => s.tasks)
   const [src, setSrc] = useState('')
+  const [maskSrc, setMaskSrc] = useState('')
+  const [maskPreviewSrc, setMaskPreviewSrc] = useState('')
 
   const close = useCallback(() => setLightboxImageId(null), [setLightboxImageId])
   useCloseOnEscape(Boolean(lightboxImageId), close)
@@ -32,7 +38,51 @@ export default function Lightbox() {
         if (url) setSrc(url)
       })
     }
-  }, [lightboxImageId])
+  }, [lightboxImageId, imageCacheRevision])
+
+  useEffect(() => {
+    let cancelled = false
+    setMaskSrc('')
+    if (!lightboxImageId) return
+
+    if (maskDraft?.targetImageId === lightboxImageId) {
+      setMaskSrc(maskDraft.maskDataUrl)
+      return
+    }
+
+    const taskMaskImageId = tasks.find((task) => task.maskTargetImageId === lightboxImageId && task.maskImageId)?.maskImageId
+    if (!taskMaskImageId) return
+
+    ensureImageCached(taskMaskImageId)
+      .then((dataUrl) => {
+        if (!cancelled && dataUrl) setMaskSrc(dataUrl)
+      })
+      .catch(() => undefined)
+
+    return () => {
+      cancelled = true
+    }
+  }, [lightboxImageId, maskDraft, tasks, imageCacheRevision])
+
+  useEffect(() => {
+    let cancelled = false
+    if (!src || !maskSrc) {
+      setMaskPreviewSrc('')
+      return
+    }
+
+    createMaskPreviewDataUrl(src, maskSrc)
+      .then((preview) => {
+        if (!cancelled) setMaskPreviewSrc(preview)
+      })
+      .catch(() => {
+        if (!cancelled) setMaskPreviewSrc('')
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [src, maskSrc])
 
   // 导航
   const currentIndex = lightboxImageId ? lightboxImageList.indexOf(lightboxImageId) : -1
@@ -64,6 +114,7 @@ export default function Lightbox() {
   return (
     <LightboxInner
       src={src}
+      maskPreviewSrc={maskPreviewSrc}
       onClose={close}
       showNav={showNav}
       currentIndex={currentIndex}
@@ -76,6 +127,7 @@ export default function Lightbox() {
 
 interface LightboxInnerProps {
   src: string
+  maskPreviewSrc?: string
   onClose: () => void
   showNav: boolean
   currentIndex: number
@@ -85,13 +137,15 @@ interface LightboxInnerProps {
 }
 
 /** 内部组件：保证挂载时 DOM 已经存在，所有 ref / effect 都可靠 */
-function LightboxInner({ src, onClose, showNav, currentIndex, total, onPrev, onNext }: LightboxInnerProps) {
+function LightboxInner({ src, maskPreviewSrc, onClose, showNav, currentIndex, total, onPrev, onNext }: LightboxInnerProps) {
   const containerRef = useRef<HTMLDivElement>(null)
+  const swipeFrameRef = useRef<number | null>(null)
 
   // 用 ref 追踪最新变换，避免闭包过期
   const scaleRef = useRef(1)
   const txRef = useRef(0)
   const tyRef = useRef(0)
+  const swipeXRef = useRef(0)
 
   // 仅用于触发渲染
   const [, forceRender] = useState(0)
@@ -120,6 +174,14 @@ function LightboxInner({ src, onClose, showNav, currentIndex, total, onPrev, onN
     midY: 0,
   })
 
+  // 未缩放时的左右滑动切换
+  const swipeRef = useRef({
+    active: false,
+    moved: false,
+    startX: 0,
+    startY: 0,
+  })
+
   // 双击检测（触控）
   const tapRef = useRef({ time: 0, x: 0, y: 0 })
   const hadMultiTouchRef = useRef(false)
@@ -134,8 +196,16 @@ function LightboxInner({ src, onClose, showNav, currentIndex, total, onPrev, onN
     scaleRef.current = 1
     txRef.current = 0
     tyRef.current = 0
+    swipeXRef.current = 0
     rerender()
   }, [src, rerender])
+
+  useEffect(() => () => {
+    if (swipeFrameRef.current !== null) {
+      window.cancelAnimationFrame(swipeFrameRef.current)
+      swipeFrameRef.current = null
+    }
+  }, [])
 
   useEffect(() => {
     const suppressClick = () => {
@@ -170,6 +240,21 @@ function LightboxInner({ src, onClose, showNav, currentIndex, total, onPrev, onN
 
     rerender()
   }, [rerender])
+
+  const setSwipeX = useCallback((x: number) => {
+    swipeXRef.current = x
+    if (swipeFrameRef.current !== null) return
+    swipeFrameRef.current = window.requestAnimationFrame(() => {
+      swipeFrameRef.current = null
+      rerender()
+    })
+  }, [rerender])
+
+  const resetSwipe = useCallback(() => {
+    swipeRef.current.active = false
+    swipeRef.current.moved = false
+    setSwipeX(0)
+  }, [setSwipeX])
 
   // ====== 滚轮缩放 ======
   useEffect(() => {
@@ -290,6 +375,12 @@ function LightboxInner({ src, onClose, showNav, currentIndex, total, onPrev, onN
         const now = Date.now()
         const prev = tapRef.current
         touchStartedOnImageRef.current = e.target instanceof HTMLImageElement
+        swipeRef.current = {
+          active: false,
+          moved: false,
+          startX: t.clientX,
+          startY: t.clientY,
+        }
 
         // 双击检测
         if (
@@ -307,6 +398,7 @@ function LightboxInner({ src, onClose, showNav, currentIndex, total, onPrev, onN
             apply(3, -mx * 2, -my * 2)
           }
           tapRef.current = { time: 0, x: 0, y: 0 }
+          resetSwipe()
           return
         }
         tapRef.current = { time: now, x: t.clientX, y: t.clientY }
@@ -320,6 +412,8 @@ function LightboxInner({ src, onClose, showNav, currentIndex, total, onPrev, onN
             baseTx: txRef.current,
             baseTy: tyRef.current,
           }
+        } else if (showNav && scaleRef.current <= 1) {
+          swipeRef.current.active = true
         }
       }
     }
@@ -338,12 +432,40 @@ function LightboxInner({ src, onClose, showNav, currentIndex, total, onPrev, onN
         const t = e.touches[0]
         const d = dragRef.current
         apply(scaleRef.current, d.baseTx + t.clientX - d.startX, d.baseTy + t.clientY - d.startY)
+      } else if (showNav && swipeRef.current.active && scaleRef.current <= 1 && e.touches.length === 1) {
+        const t = e.touches[0]
+        const s = swipeRef.current
+        const dx = t.clientX - s.startX
+        const dy = t.clientY - s.startY
+        if (Math.abs(dx) < 8 || Math.abs(dx) < Math.abs(dy) * 1.15) return
+
+        e.preventDefault()
+        s.moved = true
+        tapRef.current = { time: 0, x: 0, y: 0 }
+        suppressNextClickRef.current = true
+        setSwipeX(clamp(dx, -120, 120))
       }
     }
 
     const onTouchEnd = (e: TouchEvent) => {
       if (e.touches.length < 2) pinchRef.current.active = false
       if (e.touches.length === 0) {
+        const swipe = swipeRef.current
+        if (showNav && swipe.active && scaleRef.current <= 1) {
+          const dx = swipeXRef.current
+          if (swipe.moved) {
+            if (Math.abs(dx) > 44) {
+              if (dx < 0) onNext()
+              else onPrev()
+            }
+            suppressNextClickRef.current = true
+            tapRef.current = { time: 0, x: 0, y: 0 }
+            resetSwipe()
+            return
+          }
+          resetSwipe()
+        }
+
         dragRef.current.active = false
         if (hadMultiTouchRef.current) {
           hadMultiTouchRef.current = false
@@ -372,13 +494,15 @@ function LightboxInner({ src, onClose, showNav, currentIndex, total, onPrev, onN
       el.removeEventListener('touchmove', onTouchMove)
       el.removeEventListener('touchend', onTouchEnd)
     }
-  }, [apply, getCenter, onClose])
+  }, [apply, getCenter, onClose, onNext, onPrev, resetSwipe, setSwipeX, showNav])
 
   const s = scaleRef.current
   const tx = txRef.current
   const ty = tyRef.current
   const isZoomed = s > 1
   const isDragging = dragRef.current.active || pinchRef.current.active
+  const isSwiping = swipeRef.current.active && swipeRef.current.moved && !isZoomed
+  const visualTx = isZoomed ? tx : swipeXRef.current
   const zoomPercent = Math.round(s * 100)
 
   const navBtnClass =
@@ -396,11 +520,12 @@ function LightboxInner({ src, onClose, showNav, currentIndex, total, onPrev, onN
       <div className="absolute inset-0 bg-black/70 backdrop-blur-md animate-fade-in" />
       <div className="relative animate-zoom-in">
         <img
-          src={src}
-          className="max-w-[85vw] max-h-[85vh] object-contain rounded-lg shadow-2xl"
+          src={maskPreviewSrc || src}
+          className="saveable-image max-w-[85vw] max-h-[85vh] object-contain rounded-lg shadow-2xl"
+          decoding="async"
           style={{
-            transform: `translate(${tx}px, ${ty}px) scale(${s})`,
-            transition: isDragging ? 'none' : 'transform 0.2s ease-out',
+            transform: `translate(${visualTx}px, ${ty}px) scale(${s})`,
+            transition: isDragging || isSwiping ? 'none' : 'transform 0.2s ease-out',
             willChange: 'transform',
           }}
           onDragStart={(e) => e.preventDefault()}

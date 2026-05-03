@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 
 interface Option {
   label: string
+  selectedLabel?: string
   value: string | number
 }
 
@@ -55,7 +56,7 @@ export default function Select({ value, onChange, options, disabled, className }
           disabled ? '!opacity-50 !cursor-not-allowed !bg-gray-100/50 dark:!bg-white/[0.02]' : ''
         }`}
       >
-        <span className="truncate">{selectedOption?.label ?? value}</span>
+        <span className="truncate">{selectedOption?.selectedLabel ?? selectedOption?.label ?? value}</span>
         <svg
           className={`w-3.5 h-3.5 flex-shrink-0 text-gray-400 dark:text-gray-500 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`}
           fill="none"

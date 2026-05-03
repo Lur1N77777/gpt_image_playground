@@ -6,9 +6,17 @@ export interface DevProxyConfig {
   secure: boolean
 }
 
+const DEFAULT_PROXY_PREFIX = '/api-proxy'
+
+export function isRelativeApiBaseUrl(baseUrl: string): boolean {
+  const trimmed = baseUrl.trim()
+  return trimmed.startsWith('/') && !trimmed.startsWith('//')
+}
+
 export function normalizeBaseUrl(baseUrl: string): string {
   const trimmed = baseUrl.trim()
   if (!trimmed) return ''
+  if (isRelativeApiBaseUrl(trimmed)) return trimmed.replace(/\/+$/, '')
 
   const input = /^[a-zA-Z][a-zA-Z\d+.-]*:\/\//.test(trimmed)
     ? trimmed
@@ -16,7 +24,8 @@ export function normalizeBaseUrl(baseUrl: string): string {
 
   try {
     const url = new URL(input)
-    return `${url.protocol}//${url.host}`
+    const pathname = url.pathname.replace(/\/+$/, '')
+    return `${url.origin}${pathname === '/' ? '' : pathname}`
   } catch {
     return trimmed.replace(/\/+$/, '')
   }
@@ -29,9 +38,9 @@ export function normalizeDevProxyConfig(input: unknown): DevProxyConfig | null {
   const target = normalizeBaseUrl(typeof record.target === 'string' ? record.target : '')
   if (!target) return null
 
-  const rawPrefix = typeof record.prefix === 'string' ? record.prefix : '/api-proxy'
+  const rawPrefix = typeof record.prefix === 'string' ? record.prefix : DEFAULT_PROXY_PREFIX
   const trimmedPrefix = rawPrefix.trim().replace(/^\/+/, '').replace(/\/+$/, '')
-  const prefix = trimmedPrefix ? `/${trimmedPrefix}` : '/api-proxy'
+  const prefix = trimmedPrefix ? `/${trimmedPrefix}` : DEFAULT_PROXY_PREFIX
 
   return {
     enabled: Boolean(record.enabled),
@@ -42,16 +51,32 @@ export function normalizeDevProxyConfig(input: unknown): DevProxyConfig | null {
   }
 }
 
-export function buildApiUrl(baseUrl: string, path: string, proxyConfig?: DevProxyConfig | null): string {
+export function buildApiUrl(
+  baseUrl: string,
+  path: string,
+  proxyConfig?: DevProxyConfig | null,
+  useApiProxy = false,
+): string {
   const normalizedBaseUrl = normalizeBaseUrl(baseUrl)
-  const apiPath = ['v1', path.replace(/^\/+/, '')].join('/')
-  const useProxy =
-    Boolean(proxyConfig?.enabled) &&
-    Boolean(proxyConfig?.target) &&
-    normalizedBaseUrl === proxyConfig?.target
+  const endpointPath = path.replace(/^\/+/, '')
+  const normalizedPath = normalizedBaseUrl.replace(/\/+$/, '')
+  if (/^https?:\/\//i.test(endpointPath) || isRelativeApiBaseUrl(endpointPath)) {
+    return endpointPath
+  }
 
-  if (useProxy) {
-    return `${proxyConfig!.prefix}/${apiPath}`
+  if (
+    normalizedPath.endsWith(`/${endpointPath}`) ||
+    normalizedPath.endsWith(`/v1/${endpointPath}`)
+  ) {
+    return normalizedPath
+  }
+
+  const apiPath = normalizedBaseUrl.endsWith('/v1')
+    ? endpointPath
+    : ['v1', endpointPath].join('/')
+
+  if (useApiProxy) {
+    return `${proxyConfig?.prefix ?? DEFAULT_PROXY_PREFIX}/${apiPath}`
   }
 
   return normalizedBaseUrl ? `${normalizedBaseUrl}/${apiPath}` : `/${apiPath}`
@@ -67,4 +92,8 @@ export function readClientDevProxyConfig(): DevProxyConfig | null {
     typeof __DEV_PROXY_CONFIG__ === 'undefined' ? null : __DEV_PROXY_CONFIG__,
     import.meta.env.DEV,
   )
+}
+
+export function isApiProxyAvailable(proxyConfig: DevProxyConfig | null = readClientDevProxyConfig()): boolean {
+  return import.meta.env.VITE_API_PROXY_AVAILABLE === 'true' || Boolean(proxyConfig?.enabled)
 }

@@ -1,0 +1,19 @@
+name = "gpt-image-playground"
+pages_build_output_dir = "./dist"
+compatibility_date = "2026-04-25"
+
+[vars]
+CLEANUP_RETENTION_DAYS = "1"
+
+[[d1_databases]]
+binding = "IMAGE_DB"
+database_name = "gpt-image-playground-db"
+database_id = "1c7b76fb-7194-4fb4-ae57-e45e520b9ca3"
+
+[[r2_buckets]]
+binding = "IMAGE_BUCKET"
+bucket_name = "gpt-image-playground-images"
+
+[[queues.producers]]
+binding = "IMAGE_QUEUE"
+queue = "gpt-image-playground-jobs"

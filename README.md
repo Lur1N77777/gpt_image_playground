@@ -2,7 +2,13 @@
 
 基于 OpenAI `gpt-image-2` 接口的图片生成与编辑工具。提供简洁的 Web UI，支持文本生成图片、参考图编辑、可视化参数调节、历史记录管理与本地数据导入导出。
 
-**Vercel 部署版本在线体验：** [https://gpt-image-playground.cooksleep.dev](https://gpt-image-playground.cooksleep.dev)
+> 如有调用非本地的 HTTP API 的需求，请使用 GitHub Pages 版本或自行部署，因为 `.dev` 域名要求页面本身及其加载的资源（的来源）均为 HTTPS。
+
+**Vercel 部署版本在线体验：**
+https://gpt-image-playground.cooksleep.dev
+
+**GitHub Pages 部署版本在线体验：**
+https://cooksleep.github.io/gpt_image_playground
 
 ---
 
@@ -59,6 +65,10 @@
 ## 🚀 部署与使用
 
 支持多种部署与使用方式，推荐使用 Vercel 一键部署。
+
+> 本分支额外支持 Cloudflare Pages + Functions 服务端代理部署：前端默认请求
+> `/api/openai`，OpenAI API Key 仅存放在 Cloudflare Secret 中。详见
+> [Cloudflare Pages 部署说明](docs/cloudflare-pages.md)。
 
 <details>
 <summary><strong>▲ 方式一：Vercel 一键部署 (推荐)</strong></summary>
@@ -204,6 +214,10 @@ docker compose up -d
 
 例如：
 - 接入 New API 聊天应用：
+  ```
+  https://gpt-image-playground.cooksleep.dev?apiUrl={address}&apiKey={key}
+  ```
+
   ```
   https://cooksleep.github.io/gpt_image_playground?apiUrl={address}&apiKey={key}
   ```

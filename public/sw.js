@@ -1,5 +1,5 @@
-const CACHE_NAME = 'gpt-image-playground-v0.1.5'
-const APP_SHELL = ['./', './index.html', './manifest.webmanifest', './pwa-icon.svg']
+const CACHE_NAME = 'linmh-image-playground-v0.2.33'
+const APP_SHELL = ['./', './index.html', './manifest.webmanifest', './logo.png']
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -24,6 +24,7 @@ self.addEventListener('fetch', (event) => {
 
   const url = new URL(request.url)
   if (url.origin !== self.location.origin) return
+  if (url.pathname.startsWith('/api/')) return
 
   if (request.mode === 'navigate') {
     event.respondWith(

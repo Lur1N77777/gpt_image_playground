@@ -1,20 +1,28 @@
-import { useRef, useEffect, useCallback, useState } from 'react'
-import { useStore, submitTask, addImageFromFile } from '../store'
+import { useRef, useEffect, useCallback, useState, useMemo } from 'react'
+import { createPortal } from 'react-dom'
+import {
+  useStore,
+  submitTask,
+  addImageFromFile,
+  removeTasks,
+  setTasksFavorite,
+  exportTasks,
+  getFilteredTasks,
+} from '../store'
 import { DEFAULT_PARAMS } from '../types'
 import { normalizeImageSize } from '../lib/size'
+import { isRelativeApiBaseUrl } from '../lib/api'
+import { createMaskPreviewDataUrl } from '../lib/canvasImage'
 import Select from './Select'
 import SizePickerModal from './SizePickerModal'
+import ViewportTooltip from './ViewportTooltip'
 
 /** 通用悬浮气泡提示 */
 function ButtonTooltip({ visible, text }: { visible: boolean; text: string }) {
-  if (!visible) return null
   return (
-    <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 pointer-events-none z-10 whitespace-nowrap">
-      <div className="relative bg-gray-800 text-white text-xs rounded-lg px-3 py-2 shadow-lg">
-        {text}
-        <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-800" />
-      </div>
-    </div>
+    <ViewportTooltip visible={visible} className="z-10 whitespace-nowrap">
+      {text}
+    </ViewportTooltip>
   )
 }
 
@@ -37,12 +45,28 @@ export default function InputBar() {
   const inputImages = useStore((s) => s.inputImages)
   const removeInputImage = useStore((s) => s.removeInputImage)
   const clearInputImages = useStore((s) => s.clearInputImages)
+  const maskDraft = useStore((s) => s.maskDraft)
+  const clearMaskDraft = useStore((s) => s.clearMaskDraft)
+  const setMaskEditorImageId = useStore((s) => s.setMaskEditorImageId)
+  const moveInputImage = useStore((s) => s.moveInputImage)
   const params = useStore((s) => s.params)
   const setParams = useStore((s) => s.setParams)
   const settings = useStore((s) => s.settings)
   const setShowSettings = useStore((s) => s.setShowSettings)
   const setLightboxImageId = useStore((s) => s.setLightboxImageId)
+  const showToast = useStore((s) => s.showToast)
   const setConfirmDialog = useStore((s) => s.setConfirmDialog)
+  const sessionToken = useStore((s) => s.sessionToken)
+  const isSubmitting = useStore((s) => s.isSubmitting)
+  const selectedTaskIds = useStore((s) => s.selectedTaskIds)
+  const setSelectedTaskIds = useStore((s) => s.setSelectedTaskIds)
+  const clearSelection = useStore((s) => s.clearSelection)
+  const tasks = useStore((s) => s.tasks)
+  const filterStatus = useStore((s) => s.filterStatus)
+  const filterFavorite = useStore((s) => s.filterFavorite)
+  const searchQuery = useStore((s) => s.searchQuery)
+  const currentUser = useStore((s) => s.currentUser)
+  const selectedUserFilter = useStore((s) => s.selectedUserFilter)
 
   const fileInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -53,10 +77,24 @@ export default function InputBar() {
   const [isDragging, setIsDragging] = useState(false)
   const [submitHover, setSubmitHover] = useState(false)
   const [attachHover, setAttachHover] = useState(false)
+  const [qualityHintVisible, setQualityHintVisible] = useState(false)
+  const [imageHintId, setImageHintId] = useState<string | null>(null)
   const [mobileCollapsed, setMobileCollapsed] = useState(false)
   const [showSizePicker, setShowSizePicker] = useState(false)
+  const [maskPreviewUrl, setMaskPreviewUrl] = useState<string | null>(null)
+  const [imageDragIndex, setImageDragIndex] = useState<number | null>(null)
+  const [imageDragOverIndex, setImageDragOverIndex] = useState<number | null>(null)
+  const [touchDragPreview, setTouchDragPreview] = useState<{ src: string; x: number; y: number } | null>(null)
   const handleRef = useRef<HTMLDivElement>(null)
   const dragTouchRef = useRef({ startY: 0, moved: false })
+  const imageDragIndexRef = useRef<number | null>(null)
+  const imageTouchDragRef = useRef({ index: null as number | null, startX: 0, startY: 0, moved: false })
+  const imageDragOverIndexRef = useRef<number | null>(null)
+  const imageDragPreviewRef = useRef<HTMLElement | null>(null)
+  const suppressImageClickRef = useRef(false)
+  const maskConflictNoticeShownRef = useRef(false)
+  const qualityHintTimerRef = useRef<number | null>(null)
+  const imageHintTimerRef = useRef<number | null>(null)
   const [outputCompressionInput, setOutputCompressionInput] = useState(
     params.output_compression == null ? '' : String(params.output_compression),
   )
@@ -64,8 +102,83 @@ export default function InputBar() {
   const dragCounter = useRef(0)
   const isMobile = useIsMobile()
 
-  const canSubmit = (prompt.trim() || inputImages.length) && settings.apiKey
+  const isServerProxy = isRelativeApiBaseUrl(settings.baseUrl)
+  const hasCredential = Boolean(sessionToken) || (isServerProxy ? false : Boolean(settings.apiKey))
+  const canSubmit = Boolean((prompt.trim() || inputImages.length) && hasCredential && !isSubmitting)
   const atImageLimit = inputImages.length >= API_MAX_IMAGES
+  const maskTargetImage = maskDraft
+    ? inputImages.find((img) => img.id === maskDraft.targetImageId) ?? null
+    : null
+  const referenceImages = maskTargetImage
+    ? inputImages.filter((img) => img.id !== maskTargetImage.id)
+    : inputImages
+  const orderedPreviewImages = maskTargetImage
+    ? [maskTargetImage, ...referenceImages]
+    : inputImages
+  const filteredTasks = useMemo(
+    () => getFilteredTasks(tasks, { searchQuery, filterStatus, currentUser, selectedUserFilter, filterFavorite }),
+    [tasks, searchQuery, filterStatus, currentUser, selectedUserFilter, filterFavorite],
+  )
+  const selectedTasks = useMemo(
+    () => tasks.filter((task) => selectedTaskIds.includes(task.id)),
+    [tasks, selectedTaskIds],
+  )
+  const selectedIdSet = useMemo(() => new Set(selectedTaskIds), [selectedTaskIds])
+  const visibleIds = useMemo(() => filteredTasks.map((task) => task.id), [filteredTasks])
+  const allVisibleSelected =
+    visibleIds.length > 0 && visibleIds.every((id) => selectedIdSet.has(id))
+
+  const handleSelectAllToggle = useCallback(() => {
+    if (!visibleIds.length) return
+    const visibleIdSet = new Set(visibleIds)
+    if (allVisibleSelected) {
+      setSelectedTaskIds((prev) => prev.filter((id) => !visibleIdSet.has(id)))
+    } else {
+      setSelectedTaskIds((prev) => Array.from(new Set([...prev, ...visibleIds])))
+    }
+  }, [allVisibleSelected, setSelectedTaskIds, visibleIds])
+
+  const handleExportSelected = useCallback(() => {
+    if (!selectedTaskIds.length) return
+    void exportTasks(selectedTaskIds)
+  }, [selectedTaskIds])
+
+  const handleToggleFavorite = useCallback(() => {
+    if (!selectedTasks.length) return
+    const nextFavorite = !(selectedTasks.length > 0 && selectedTasks.every((task) => task.isFavorite))
+    setConfirmDialog({
+      title: nextFavorite ? '批量收藏' : '批量取消收藏',
+      message: nextFavorite
+        ? `确定要收藏选中的 ${selectedTasks.length} 条记录吗？`
+        : `确定要取消收藏选中的 ${selectedTasks.length} 条记录吗？`,
+      confirmText: nextFavorite ? '确认收藏' : '确认取消',
+      action: () => {
+        void setTasksFavorite(selectedTasks, nextFavorite)
+        clearSelection()
+      },
+    })
+  }, [clearSelection, selectedTasks, setConfirmDialog])
+
+  const handleDeleteSelected = useCallback(() => {
+    if (!selectedTasks.length) return
+    setConfirmDialog({
+      title: '批量删除',
+      message: `确定要删除选中的 ${selectedTasks.length} 条记录吗？关联的图片资源也会被清理（如果没有其他任务引用）。`,
+      confirmText: '确认删除',
+      action: () => {
+        void removeTasks(selectedTasks)
+        clearSelection()
+      },
+    })
+  }, [clearSelection, selectedTasks, setConfirmDialog])
+
+  const handleSubmitClick = () => {
+    if (!hasCredential) {
+      setShowSettings(true)
+      return
+    }
+    if (canSubmit) void submitTask()
+  }
 
   useEffect(() => {
     setOutputCompressionInput(
@@ -76,6 +189,41 @@ export default function InputBar() {
   useEffect(() => {
     setNInput(String(params.n))
   }, [params.n])
+
+  useEffect(() => {
+    if (settings.codexCli && params.quality !== 'auto') {
+      setParams({ quality: 'auto' })
+    }
+  }, [params.quality, settings.codexCli, setParams])
+
+  useEffect(() => () => {
+    if (qualityHintTimerRef.current != null) {
+      window.clearTimeout(qualityHintTimerRef.current)
+    }
+    if (imageHintTimerRef.current != null) {
+      window.clearTimeout(imageHintTimerRef.current)
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    if (!maskDraft || !maskTargetImage) {
+      setMaskPreviewUrl(null)
+      return
+    }
+
+    createMaskPreviewDataUrl(maskTargetImage.dataUrl, maskDraft.maskDataUrl)
+      .then((preview) => {
+        if (!cancelled) setMaskPreviewUrl(preview)
+      })
+      .catch(() => {
+        if (!cancelled) setMaskPreviewUrl(null)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [maskDraft, maskTargetImage])
 
   const commitOutputCompression = useCallback(() => {
     if (outputCompressionInput.trim() === '') {
@@ -101,6 +249,48 @@ export default function InputBar() {
     setNInput(String(normalizedValue))
     setParams({ n: normalizedValue })
   }, [nInput, params.n, setParams])
+
+  const showQualityHint = () => {
+    if (settings.codexCli) setQualityHintVisible(true)
+  }
+
+  const hideQualityHint = () => {
+    setQualityHintVisible(false)
+    if (qualityHintTimerRef.current != null) {
+      window.clearTimeout(qualityHintTimerRef.current)
+      qualityHintTimerRef.current = null
+    }
+  }
+
+  const startQualityHintTouch = () => {
+    if (!settings.codexCli) return
+    qualityHintTimerRef.current = window.setTimeout(() => {
+      setQualityHintVisible(true)
+      qualityHintTimerRef.current = null
+    }, 450)
+  }
+
+  const clearImageHintTimer = () => {
+    if (imageHintTimerRef.current != null) {
+      window.clearTimeout(imageHintTimerRef.current)
+      imageHintTimerRef.current = null
+    }
+  }
+
+  const showImageHint = (id: string) => setImageHintId(id)
+
+  const hideImageHint = () => {
+    setImageHintId(null)
+    clearImageHintTimer()
+  }
+
+  const startImageHintTouch = (id: string) => {
+    clearImageHintTimer()
+    imageHintTimerRef.current = window.setTimeout(() => {
+      setImageHintId(id)
+      imageHintTimerRef.current = null
+    }, 450)
+  }
 
   const handleFiles = async (files: FileList | File[]) => {
     try {
@@ -147,7 +337,7 @@ export default function InputBar() {
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
       e.preventDefault()
-      submitTask()
+      handleSubmitClick()
     }
   }
 
@@ -260,7 +450,7 @@ export default function InputBar() {
   // 图片队列变化时也重新计算
   useEffect(() => {
     adjustTextareaHeight()
-  }, [inputImages.length, adjustTextareaHeight])
+  }, [inputImages.length, Boolean(maskDraft), maskPreviewUrl, adjustTextareaHeight])
 
   useEffect(() => {
     window.addEventListener('resize', adjustTextareaHeight)
@@ -297,50 +487,324 @@ export default function InputBar() {
 
   const selectClass = 'px-3 py-1.5 rounded-xl border border-gray-200/60 dark:border-white/[0.08] bg-white/50 dark:bg-white/[0.03] hover:bg-white dark:hover:bg-white/[0.06] text-xs transition-all duration-200 shadow-sm'
 
-  const renderImageThumbs = () => (
-    <div ref={imagesRef}>
-      <div className="grid grid-cols-[repeat(auto-fill,52px)] justify-between gap-x-2 gap-y-3 mb-3">
-        {inputImages.map((img, idx) => (
-          <div key={img.id} className="relative group inline-block">
-            <div className="relative w-[52px] h-[52px] rounded-xl overflow-hidden border border-gray-200 dark:border-white/[0.08] shadow-sm cursor-pointer">
-              <img
-                src={img.dataUrl}
-                className="w-full h-full object-cover hover:opacity-90 transition-opacity"
-                onClick={() => setLightboxImageId(img.id, inputImages.map((i) => i.id))}
-                alt=""
-              />
-            </div>
-            <span
-              className="absolute -top-2 -right-2 w-[22px] h-[22px] rounded-full bg-red-500 text-white flex items-center justify-center cursor-pointer opacity-0 group-hover:opacity-100 transition-opacity shadow-md hover:bg-red-600"
-              onClick={() => removeInputImage(idx)}
-            >
-              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </span>
-          </div>
-        ))}
+  const getTouchDropIndex = (touch: React.Touch) => {
+    const target = document
+      .elementFromPoint(touch.clientX, touch.clientY)
+      ?.closest<HTMLElement>('[data-input-image-index]')
+    if (!target) return null
+    const idx = Number(target.dataset.inputImageIndex)
+    if (!Number.isInteger(idx)) return null
+    const rect = target.getBoundingClientRect()
+    return touch.clientX < rect.left + rect.width / 2 ? idx : idx + 1
+  }
 
-        {/* 清空全部按钮 */}
-        <button
-          onClick={() =>
-            setConfirmDialog({
-              title: '清空参考图',
-              message: `确定要清空全部 ${inputImages.length} 张参考图吗？`,
-              action: () => clearInputImages(),
-            })
-          }
-          className="w-[52px] h-[52px] rounded-xl border border-dashed border-gray-300 dark:border-white/[0.08] flex flex-col items-center justify-center gap-0.5 text-gray-400 dark:text-gray-500 hover:text-red-500 hover:border-red-300 hover:bg-red-50/50 dark:hover:bg-red-950/30 transition-all cursor-pointer flex-shrink-0"
-          title="清空全部参考图"
+  const normalizeImageDropIndex = (idx: number) => {
+    const minIdx = maskTargetImage ? 1 : 0
+    return Math.max(minIdx, Math.min(inputImages.length, idx))
+  }
+
+  const isBeforeMaskDropArea = (clientX: number) => {
+    if (!maskTargetImage) return false
+    const maskEl = document.querySelector<HTMLElement>('[data-input-image-index="0"]')
+    if (!maskEl) return false
+    const rect = maskEl.getBoundingClientRect()
+    return clientX < rect.left + rect.width / 2
+  }
+
+  const resetImageDrag = () => {
+    setImageDragIndex(null)
+    setImageDragOverIndex(null)
+    imageDragIndexRef.current = null
+    imageDragOverIndexRef.current = null
+    imageTouchDragRef.current = { index: null, startX: 0, startY: 0, moved: false }
+    setTouchDragPreview(null)
+    imageDragPreviewRef.current?.remove()
+    imageDragPreviewRef.current = null
+    hideImageHint()
+  }
+
+  useEffect(() => {
+    if (!touchDragPreview) return
+    const previousOverflow = document.body.style.overflow
+    const previousOverscroll = document.body.style.overscrollBehavior
+    document.body.style.overflow = 'hidden'
+    document.body.style.overscrollBehavior = 'none'
+    return () => {
+      document.body.style.overflow = previousOverflow
+      document.body.style.overscrollBehavior = previousOverscroll
+    }
+  }, [touchDragPreview])
+
+  const getDataTransferDragIndex = (event: React.DragEvent) => {
+    const value = event.dataTransfer.getData('text/plain')
+    const idx = Number(value)
+    return Number.isInteger(idx) ? idx : null
+  }
+
+  const setImageDragTarget = (idx: number | null, clientX?: number) => {
+    const fromIdx = imageDragIndexRef.current
+    if (fromIdx !== null && maskTargetImage && (idx === 0 || (clientX != null && isBeforeMaskDropArea(clientX)))) {
+      showImageHint(maskTargetImage.id)
+      imageDragOverIndexRef.current = null
+      setImageDragOverIndex(null)
+      return
+    }
+
+    if (fromIdx !== null) hideImageHint()
+    const normalizedIdx = idx == null ? null : normalizeImageDropIndex(idx)
+    const isNoopTarget = fromIdx !== null && normalizedIdx !== null && (normalizedIdx === fromIdx || normalizedIdx === fromIdx + 1)
+    const nextIdx = isNoopTarget ? null : normalizedIdx
+    imageDragOverIndexRef.current = nextIdx
+    setImageDragOverIndex(nextIdx)
+  }
+
+  const renderImageThumb = (img: (typeof inputImages)[number], idx: number, lightboxList: string[]) => {
+    const isMaskTarget = maskDraft?.targetImageId === img.id
+    const canEdit = !maskTargetImage || isMaskTarget
+    const imageHintText = isMaskTarget
+      ? '遮罩图必须为第一张图'
+      : maskTargetImage
+        ? '只能有一张遮罩图'
+        : ''
+    const displaySrc = isMaskTarget && maskPreviewUrl ? maskPreviewUrl : img.dataUrl
+    const isImageDragging = imageDragIndex === idx
+    const isLast = idx === inputImages.length - 1
+    const showDropBefore = imageDragOverIndex === idx && imageDragIndex !== idx
+    const showDropAfter = imageDragOverIndex === inputImages.length && isLast && imageDragIndex !== idx
+
+    const handleDragStart = (event: React.DragEvent) => {
+      if (isMaskTarget) {
+        event.preventDefault()
+        return
+      }
+      hideImageHint()
+      imageDragIndexRef.current = idx
+      setImageDragIndex(idx)
+      event.dataTransfer.effectAllowed = 'move'
+      event.dataTransfer.setData('text/plain', String(idx))
+      const preview = document.createElement('div')
+      preview.style.cssText = 'position:fixed;left:-1000px;top:-1000px;width:52px;height:52px;border-radius:12px;overflow:hidden;box-shadow:0 4px 12px rgba(0,0,0,0.25);'
+      const previewImg = document.createElement('img')
+      previewImg.src = displaySrc
+      previewImg.style.cssText = 'width:52px;height:52px;object-fit:cover;display:block;'
+      preview.appendChild(previewImg)
+      document.body.appendChild(preview)
+      imageDragPreviewRef.current = preview
+      event.dataTransfer.setDragImage(preview, 26, 26)
+    }
+
+    const handleDragOver = (event: React.DragEvent) => {
+      event.preventDefault()
+      event.dataTransfer.dropEffect = 'move'
+      const fromIdx = imageDragIndexRef.current
+      if (fromIdx === null || fromIdx === idx) return
+      const rect = event.currentTarget.getBoundingClientRect()
+      setImageDragTarget(event.clientX < rect.left + rect.width / 2 ? idx : idx + 1, event.clientX)
+    }
+
+    const handleDrop = (event: React.DragEvent) => {
+      event.preventDefault()
+      const fromIdx = imageDragIndexRef.current ?? getDataTransferDragIndex(event)
+      const toIdx = imageDragOverIndexRef.current
+      if (fromIdx !== null && toIdx !== null) {
+        moveInputImage(fromIdx, toIdx)
+      }
+      resetImageDrag()
+    }
+
+    const handleTouchStart = (event: React.TouchEvent) => {
+      if (isMaskTarget) {
+        startImageHintTouch(img.id)
+        return
+      }
+      const touch = event.touches[0]
+      imageDragIndexRef.current = idx
+      imageTouchDragRef.current = { index: idx, startX: touch.clientX, startY: touch.clientY, moved: false }
+      setTouchDragPreview(null)
+    }
+
+    const handleTouchMove = (event: React.TouchEvent) => {
+      const touch = event.touches[0]
+      const touchDrag = imageTouchDragRef.current
+      if (touchDrag.index === null) return
+
+      touchDrag.moved = true
+      clearImageHintTimer()
+      setImageHintId(null)
+      suppressImageClickRef.current = true
+      event.preventDefault()
+      setImageDragIndex(touchDrag.index)
+      setTouchDragPreview({ src: displaySrc, x: touch.clientX, y: touch.clientY })
+      const dropIndex = getTouchDropIndex(touch)
+      setImageDragTarget(dropIndex, touch.clientX)
+    }
+
+    const handleTouchEnd = (event: React.TouchEvent) => {
+      const touchDrag = imageTouchDragRef.current
+      clearImageHintTimer()
+      if (touchDrag.index !== null && imageDragOverIndexRef.current !== null) {
+        event.preventDefault()
+        moveInputImage(touchDrag.index, imageDragOverIndexRef.current)
+        window.setTimeout(() => {
+          suppressImageClickRef.current = false
+        }, 0)
+      } else {
+        suppressImageClickRef.current = false
+      }
+      resetImageDrag()
+    }
+
+    const handleTouchCancel = () => {
+      suppressImageClickRef.current = false
+      hideImageHint()
+      resetImageDrag()
+    }
+
+    return (
+      <div
+        key={img.id}
+        data-input-image-index={idx}
+        className={`relative group inline-block shrink-0 transition-opacity ${isImageDragging ? 'opacity-40' : ''}`}
+        style={{ touchAction: isMaskTarget ? 'auto' : 'none' }}
+        draggable={!isMobile && !isMaskTarget}
+        onMouseEnter={() => imageHintText && (!isMobile || isMaskTarget) && showImageHint(img.id)}
+        onMouseLeave={hideImageHint}
+        onDragStart={handleDragStart}
+        onDragOver={handleDragOver}
+        onDrop={handleDrop}
+        onDragEnd={resetImageDrag}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
+        onTouchCancel={handleTouchCancel}
+      >
+        <ButtonTooltip
+          visible={imageHintId === img.id && Boolean(imageHintText) && (!isMobile || isMaskTarget)}
+          text={imageHintText}
+        />
+        {showDropBefore && (
+          <div className="absolute -left-[5px] top-0 bottom-0 w-[2px] bg-blue-500 rounded-full z-40 shadow-sm pointer-events-none" />
+        )}
+        {showDropAfter && (
+          <div className="absolute -right-[5px] top-0 bottom-0 w-[2px] bg-blue-500 rounded-full z-40 shadow-sm pointer-events-none" />
+        )}
+        <div
+          className={`relative w-[52px] h-[52px] rounded-xl overflow-hidden shadow-sm cursor-grab active:cursor-grabbing select-none ${
+          isMaskTarget
+            ? 'border-2 border-blue-500'
+            : 'border border-gray-200 dark:border-white/[0.08]'
+        }`}
+          onClick={() => {
+            if (suppressImageClickRef.current) return
+            if (isMaskTarget) {
+              setMaskEditorImageId(img.id)
+              return
+            }
+            if (isMobile && maskTargetImage && !maskConflictNoticeShownRef.current) {
+              maskConflictNoticeShownRef.current = true
+              showToast('只能有一张遮罩图', 'info')
+            }
+            setLightboxImageId(img.id, lightboxList)
+          }}
         >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-          </svg>
-          <span className="text-[9px] leading-none">清空</span>
-        </button>
+          <img
+            src={displaySrc}
+            className="w-full h-full object-cover hover:opacity-90 transition-opacity pointer-events-none"
+            decoding="async"
+            alt=""
+          />
+          {isMaskTarget && (
+            <span className="absolute left-1 bottom-1 rounded-md bg-blue-500/90 px-1.5 py-0.5 text-[9px] font-semibold text-white shadow pointer-events-none">
+              MASK
+            </span>
+          )}
+          {canEdit && (
+            <button
+              type="button"
+              className="absolute inset-0 w-full h-full bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center cursor-pointer z-20 focus:outline-none border-none"
+              onClick={(event) => {
+                event.stopPropagation()
+                setMaskEditorImageId(img.id)
+              }}
+              title={isMaskTarget ? '编辑遮罩' : '添加遮罩'}
+            >
+              <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536M4 20h4.5L19.5 9a2.5 2.5 0 00-3.536-3.536L5 16.5V20z" />
+              </svg>
+            </button>
+          )}
+        </div>
+        {!isMaskTarget && (
+          <span
+            className="absolute -top-2 -right-2 w-[22px] h-[22px] rounded-full bg-red-500 text-white flex items-center justify-center cursor-pointer opacity-0 group-hover:opacity-100 transition-opacity shadow-md hover:bg-red-600 z-30"
+            onClick={(event) => {
+              event.stopPropagation()
+              removeInputImage(idx)
+            }}
+          >
+            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </span>
+        )}
       </div>
-    </div>
+    )
+  }
+
+  const renderClearAllButton = () => (
+    <button
+      onClick={() =>
+        setConfirmDialog({
+          title: maskTargetImage ? '清空全部输入图' : '清空参考图',
+          message: maskTargetImage
+            ? `确定要清空遮罩主图、${referenceImages.length} 张参考图和当前遮罩吗？`
+            : `确定要清空全部 ${inputImages.length} 张参考图吗？`,
+          action: () => clearInputImages(),
+        })
+      }
+      className="w-[52px] h-[52px] rounded-xl border border-dashed border-gray-300 dark:border-white/[0.08] flex flex-col items-center justify-center gap-0.5 text-gray-400 dark:text-gray-500 hover:text-red-500 hover:border-red-300 hover:bg-red-50/50 dark:hover:bg-red-950/30 transition-all cursor-pointer flex-shrink-0"
+      title={maskTargetImage ? '清空遮罩主图、参考图和遮罩' : '清空全部参考图'}
+    >
+      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+      </svg>
+      <span className="text-[8px] leading-none">{maskTargetImage ? '清空全部' : '清空'}</span>
+    </button>
   )
+
+  const renderImageThumbs = () => {
+    const lightboxList = inputImages.map((img) => img.id)
+
+    return (
+      <div ref={imagesRef}>
+        <div className="grid grid-cols-[repeat(auto-fill,52px)] justify-between gap-x-2 gap-y-3 mb-3">
+          {inputImages.map((img, idx) => renderImageThumb(img, idx, lightboxList))}
+          {renderClearAllButton()}
+          {maskDraft && (
+            <button
+              onClick={clearMaskDraft}
+              className="w-[52px] h-[52px] rounded-xl border border-dashed border-blue-300 dark:border-blue-400/40 flex flex-col items-center justify-center gap-0.5 text-blue-500 hover:text-blue-600 hover:border-blue-400 hover:bg-blue-50/60 dark:hover:bg-blue-950/30 transition-all cursor-pointer flex-shrink-0"
+              title="移除遮罩"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 20h16M7 16l9-9a2.1 2.1 0 113 3l-9 9H7v-3z" />
+              </svg>
+              <span className="text-[9px] leading-none">遮罩</span>
+            </button>
+          )}
+        </div>
+        {touchDragPreview && createPortal(
+          <div
+            className="fixed z-[140] h-[52px] w-[52px] overflow-hidden rounded-xl shadow-xl pointer-events-none opacity-90"
+            style={{ left: touchDragPreview.x, top: touchDragPreview.y, transform: 'translate(-50%, -50%)' }}
+          >
+            <img src={touchDragPreview.src} className="h-full w-full object-cover" alt="" />
+          </div>,
+          document.body,
+        )}
+      </div>
+    )
+  }
 
   const renderParams = (cols: string) => (
     <div className={`grid ${cols} gap-2 text-xs flex-1`}>
@@ -355,18 +819,34 @@ export default function InputBar() {
           {normalizeImageSize(params.size) || DEFAULT_PARAMS.size}
         </button>
       </label>
-      <label className="flex flex-col gap-0.5">
+      <label
+        className="relative flex flex-col gap-0.5"
+        onMouseEnter={showQualityHint}
+        onMouseLeave={hideQualityHint}
+        onTouchStart={startQualityHintTouch}
+        onTouchEnd={hideQualityHint}
+        onTouchCancel={hideQualityHint}
+      >
         <span className="text-gray-400 dark:text-gray-500 ml-1">质量</span>
         <Select
-          value={params.quality}
-          onChange={(val) => setParams({ quality: val as any })}
+          value={settings.codexCli ? 'auto' : params.quality}
+          onChange={(val) => {
+            if (!settings.codexCli) setParams({ quality: val as any })
+          }}
           options={[
             { label: 'auto', value: 'auto' },
             { label: 'low', value: 'low' },
             { label: 'medium', value: 'medium' },
             { label: 'high', value: 'high' },
           ]}
-          className={selectClass}
+          disabled={settings.codexCli}
+          className={settings.codexCli
+            ? 'px-3 py-1.5 rounded-xl border border-gray-200/60 dark:border-white/[0.08] bg-gray-100/50 dark:bg-white/[0.05] opacity-50 cursor-not-allowed text-xs transition-all duration-200 shadow-sm'
+            : selectClass}
+        />
+        <ButtonTooltip
+          visible={settings.codexCli && qualityHintVisible}
+          text="Codex CLI 不支持质量参数"
         />
       </label>
       <label className="flex flex-col gap-0.5">
@@ -471,7 +951,77 @@ export default function InputBar() {
         />
       )}
 
-      <div className="fixed bottom-4 sm:bottom-6 left-1/2 -translate-x-1/2 z-30 w-full max-w-4xl px-3 sm:px-4 transition-all duration-300">
+      <div data-input-bar className="fixed bottom-4 sm:bottom-6 left-1/2 -translate-x-1/2 z-30 w-full max-w-4xl px-3 sm:px-4 transition-all duration-300">
+        {selectedTaskIds.length > 0 && (
+          <div className="flex justify-center mb-3">
+            <div className="bg-gray-800/90 dark:bg-gray-800/90 backdrop-blur shadow-lg rounded-full flex items-center p-1 border border-white/10 pointer-events-auto">
+              <button
+                onClick={clearSelection}
+                className="p-2 text-gray-300 hover:text-white transition-colors"
+                title="取消选择"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+              <div className="w-px h-5 bg-white/20 mx-1" />
+              <button
+                onClick={handleSelectAllToggle}
+                className="p-2 text-blue-400 hover:text-blue-300 transition-colors"
+                title={allVisibleSelected ? '取消全选当前可见' : '全选当前可见'}
+              >
+                {allVisibleSelected ? (
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                    <path d="M9 12l2 2 4-4" />
+                  </svg>
+                ) : (
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+                    <path strokeDasharray="4 4" d="M19 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2z" />
+                  </svg>
+                )}
+              </button>
+              <div className="w-px h-5 bg-white/20 mx-1" />
+              <button
+                onClick={handleExportSelected}
+                className="p-2 text-emerald-400 hover:text-emerald-300 transition-colors"
+                title={`导出选中（${selectedTaskIds.length}）`}
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <path d="M7 10l5 5 5-5" />
+                  <path d="M12 15V3" />
+                </svg>
+              </button>
+              <div className="w-px h-5 bg-white/20 mx-1" />
+              <button
+                onClick={handleToggleFavorite}
+                className="p-2 text-yellow-400 hover:text-yellow-300 transition-colors"
+                title="收藏/取消收藏"
+              >
+                {selectedTasks.length > 0 && selectedTasks.every((task) => task.isFavorite) ? (
+                  <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
+                  </svg>
+                ) : (
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+                    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+                  </svg>
+                )}
+              </button>
+              <div className="w-px h-5 bg-white/20 mx-1" />
+              <button
+                onClick={handleDeleteSelected}
+                className="p-2 text-red-400 hover:text-red-300 transition-colors"
+                title={`删除选中（${selectedTaskIds.length}）`}
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                </svg>
+              </button>
+            </div>
+          </div>
+        )}
         <div ref={cardRef} className="bg-white/70 dark:bg-gray-900/70 backdrop-blur-2xl border border-white/50 dark:border-white/[0.08] shadow-[0_8px_30px_rgb(0,0,0,0.08)] dark:shadow-[0_8px_30px_rgb(0,0,0,0.3)] rounded-2xl sm:rounded-3xl p-3 sm:p-4 ring-1 ring-black/5 dark:ring-white/10">
           {/* 移动端拖动条 */}
           <div
@@ -492,7 +1042,9 @@ export default function InputBar() {
                   </div>
                 </div>
                 {mobileCollapsed && (
-                  <div className="text-xs text-gray-400 dark:text-gray-500 mb-2 ml-1">{inputImages.length} 张参考图</div>
+                  <div className="text-xs text-gray-400 dark:text-gray-500 mb-2 ml-1">
+                    {maskDraft ? `1 张遮罩主图 · ${referenceImages.length} 张参考图` : `${inputImages.length} 张参考图`}
+                  </div>
                 )}
               </>
             ) : (
@@ -543,20 +1095,28 @@ export default function InputBar() {
                   onMouseEnter={() => setSubmitHover(true)}
                   onMouseLeave={() => setSubmitHover(false)}
                 >
-                  <ButtonTooltip visible={!settings.apiKey && submitHover} text="尚未完成 API 配置，请在右上角设置中进行" />
+                  <ButtonTooltip visible={!hasCredential && submitHover} text={isServerProxy ? '请先登录后再生成' : '尚未完成 API 配置，请在右上角设置中进行'} />
                   <button
-                    onClick={() => settings.apiKey ? submitTask() : setShowSettings(true)}
-                    disabled={settings.apiKey ? !canSubmit : false}
-                    className={`p-2.5 rounded-xl transition-all shadow-sm hover:shadow ${
-                      !settings.apiKey
+                    type="button"
+                    onClick={handleSubmitClick}
+                    disabled={hasCredential ? !canSubmit : false}
+                    className={`p-2.5 rounded-xl transition-all shadow-sm hover:shadow touch-manipulation ${
+                      !hasCredential
                         ? 'bg-gray-300 dark:bg-white/[0.06] text-white cursor-pointer'
                         : 'bg-blue-500 text-white hover:bg-blue-600 disabled:bg-gray-300 dark:disabled:bg-white/[0.04] disabled:opacity-50 disabled:cursor-not-allowed'
                     }`}
-                    title={settings.apiKey ? '生成 (Ctrl+Enter)' : '请先配置 API'}
+                    title={isSubmitting ? '正在提交' : hasCredential ? '生成 (Ctrl+Enter)' : isServerProxy ? '请先登录' : '请先配置 API'}
                   >
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
-                    </svg>
+                    {isSubmitting ? (
+                      <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
+                    ) : (
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                      </svg>
+                    )}
                   </button>
                 </div>
               </div>
@@ -597,20 +1157,28 @@ export default function InputBar() {
                   onMouseEnter={() => setSubmitHover(true)}
                   onMouseLeave={() => setSubmitHover(false)}
                 >
-                  <ButtonTooltip visible={!settings.apiKey && submitHover} text="尚未完成 API 配置，请在右上角设置中进行" />
+                  <ButtonTooltip visible={!hasCredential && submitHover} text={isServerProxy ? '请先登录后再生成' : '尚未完成 API 配置，请在右上角设置中进行'} />
                   <button
-                    onClick={() => settings.apiKey ? submitTask() : setShowSettings(true)}
-                    disabled={settings.apiKey ? !canSubmit : false}
-                    className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-medium transition-all shadow-sm ${
-                      !settings.apiKey
+                    type="button"
+                    onClick={handleSubmitClick}
+                    disabled={hasCredential ? !canSubmit : false}
+                    className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-medium transition-all shadow-sm touch-manipulation ${
+                      !hasCredential
                         ? 'bg-gray-300 dark:bg-white/[0.06] text-white cursor-pointer'
                         : 'bg-blue-500 text-white hover:bg-blue-600 disabled:bg-gray-300 dark:disabled:bg-white/[0.04] disabled:opacity-50 disabled:cursor-not-allowed'
                     }`}
                   >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
-                    </svg>
-                    生成图像
+                    {isSubmitting ? (
+                      <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
+                    ) : (
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                      </svg>
+                    )}
+                    {isSubmitting ? '提交中...' : maskDraft ? '遮罩编辑' : '生成图像'}
                   </button>
                 </div>
               </div>
