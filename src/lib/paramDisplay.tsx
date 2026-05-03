@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { TaskParams, TaskRecord } from '../types'
+import ViewportTooltip from '../components/ViewportTooltip'
 
 type ParamKey = keyof TaskParams
 
@@ -43,7 +44,7 @@ export function ActualValueBadge({ value, className = '', variant = 'highlight' 
       onMouseLeave={() => setTooltipVisible(false)}
       onFocus={() => setTooltipVisible(true)}
       onBlur={() => setTooltipVisible(false)}
-      onClick={() => setTooltipVisible((visible) => !visible)}
+      onClick={() => setTooltipVisible(true)}
       onTouchStart={() => {
         clearTouchTimer()
         touchTimerRef.current = window.setTimeout(() => {
@@ -55,12 +56,9 @@ export function ActualValueBadge({ value, className = '', variant = 'highlight' 
       onTouchCancel={clearTouchTimer}
     >
       {value}
-      {tooltipVisible && (
-        <span className="absolute bottom-full left-1/2 z-20 mb-2 -translate-x-1/2 whitespace-nowrap rounded-lg bg-gray-800 px-3 py-2 text-xs font-normal text-white shadow-lg pointer-events-none">
-          API 实际响应值
-          <span className="absolute left-1/2 top-full -translate-x-1/2 border-4 border-transparent border-t-gray-800" />
-        </span>
-      )}
+      <ViewportTooltip visible={tooltipVisible} className="whitespace-nowrap">
+        API 实际响应值
+      </ViewportTooltip>
     </span>
   )
 }

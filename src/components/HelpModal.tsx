@@ -1,74 +1,132 @@
+import { useState, useEffect } from 'react'
+import { createPortal } from 'react-dom'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 
 interface HelpModalProps {
   onClose: () => void
 }
 
+function useIsMobile() {
+  const [isMobile, setIsMobile] = useState(window.innerWidth < 640)
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth < 640)
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+  return isMobile
+}
+
 export default function HelpModal({ onClose }: HelpModalProps) {
+  const isMobile = useIsMobile()
   useCloseOnEscape(true, onClose)
 
-  return (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center p-4" onClick={onClose}>
+  return createPortal(
+    <div
+      data-no-drag-select
+      className="fixed inset-0 z-[100] flex items-center justify-center p-4"
+      onClick={onClose}
+    >
       <div className="absolute inset-0 bg-black/30 backdrop-blur-sm animate-overlay-in" />
       <div
-        className="relative z-10 w-full max-w-lg max-h-[85vh] overflow-y-auto rounded-3xl border border-white/50 bg-white/95 p-5 shadow-2xl ring-1 ring-black/5 animate-modal-in dark:border-white/[0.08] dark:bg-gray-900/95 dark:ring-white/10 custom-scrollbar"
-        onClick={(event) => event.stopPropagation()}
+        className="relative z-10 w-full max-w-md rounded-3xl border border-white/50 bg-white/95 p-5 shadow-2xl ring-1 ring-black/5 animate-modal-in dark:border-white/[0.08] dark:bg-gray-900/95 dark:ring-white/10 flex flex-col max-h-[85vh] custom-scrollbar"
+        onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-5 flex items-center justify-between gap-4">
-          <h3 className="text-base font-semibold text-gray-800 dark:text-gray-100">操作指南</h3>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-full p-1 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-white/[0.06] dark:hover:text-gray-200"
-            aria-label="关闭"
-          >
-            <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+          <h3 className="text-base font-semibold text-gray-800 dark:text-gray-100 flex items-center gap-2">
+            <svg className="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+              <circle cx="12" cy="12" r="10" />
+              <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+              <path d="M12 17h.01" />
             </svg>
-          </button>
+            操作指南
+          </h3>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={onClose}
+              className="rounded-full p-1 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-white/[0.06] dark:hover:text-gray-200"
+              aria-label="关闭"
+            >
+              <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
         </div>
 
-        <div className="space-y-4 text-sm leading-6 text-gray-600 dark:text-gray-300">
-          <section className="rounded-2xl bg-gray-50 p-4 dark:bg-white/[0.03]">
-            <h4 className="mb-2 font-medium text-gray-800 dark:text-gray-100">生成与后台任务</h4>
-            <ul className="list-disc space-y-1 pl-5">
-              <li>填写提示词后点击“生成图像”，任务会提交到 Cloudflare 后台；手机或电脑关闭浏览器后仍会继续生成。</li>
-              <li>选择多张数量时，后台会并行生成，并且每张请求间隔约 1 秒，降低偶发失败概率。</li>
-              <li>任务详情页可以左右滑动查看多张图片的完成状态；点开大图后也可以左右滑动切换。</li>
-            </ul>
-          </section>
+        <div className="flex-1 overflow-y-auto mb-6 text-sm text-gray-600 dark:text-gray-300 space-y-6 custom-scrollbar pr-2">
+          {isMobile ? (
+            <>
+              <section>
+                <h4 className="mb-4 text-sm font-medium text-gray-800 dark:text-gray-200 flex items-center gap-1.5">
+                  <svg className="w-4 h-4 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h7" />
+                  </svg>
+                  多选记录
+                </h4>
+                <div className="space-y-4">
+                  <p>在历史记录卡片上<strong className="text-blue-500 dark:text-blue-400 font-medium">左右滑动</strong>即可选中或取消选中该卡片。</p>
+                </div>
+              </section>
+              <section>
+                <h4 className="mb-4 text-sm font-medium text-gray-800 dark:text-gray-200 flex items-center gap-1.5">
+                  <svg className="w-4 h-4 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                  批量操作
+                </h4>
+                <div className="space-y-4">
+                  <p>选中一条或多条记录后，页面底部会出现操作栏，支持<strong className="text-yellow-500 dark:text-yellow-400 font-medium">批量收藏</strong>、<strong className="text-red-500 dark:text-red-400 font-medium">批量删除</strong>，或<strong className="text-blue-500 dark:text-blue-400 font-medium">全选当前可见记录</strong>。</p>
+                </div>
+              </section>
+            </>
+          ) : (
+            <>
+              <section>
+                <h4 className="mb-4 text-sm font-medium text-gray-800 dark:text-gray-200 flex items-center gap-1.5">
+                  <svg className="w-4 h-4 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h7" />
+                  </svg>
+                  多选记录
+                </h4>
+                <div className="space-y-4">
+                  <ul className="list-disc pl-4 space-y-2">
+                    <li>使用鼠标在空白处<strong className="text-blue-500 dark:text-blue-400 font-medium">拖拽框选</strong>。</li>
+                    <li>按住 <kbd className="px-1.5 py-0.5 rounded-md bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-xs font-sans">Ctrl</kbd> 或 <kbd className="px-1.5 py-0.5 rounded-md bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-xs font-sans">⌘</kbd> 并点击卡片，可添加或移除单项。</li>
+                    <li>再次框选已选中的卡片会将其取消选中。</li>
+                    <li>点击卡片外任意空白处可取消所有选择。</li>
+                  </ul>
+                </div>
+              </section>
+              <section>
+                <h4 className="mb-4 text-sm font-medium text-gray-800 dark:text-gray-200 flex items-center gap-1.5">
+                  <svg className="w-4 h-4 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                  批量操作
+                </h4>
+                <div className="space-y-4">
+                  <p>选中一条或多条记录后，页面底部会出现操作栏，支持<strong className="text-yellow-500 dark:text-yellow-400 font-medium">批量收藏</strong>、<strong className="text-red-500 dark:text-red-400 font-medium">批量删除</strong>，或<strong className="text-blue-500 dark:text-blue-400 font-medium">全选当前可见记录</strong>。</p>
+                </div>
+              </section>
+            </>
+          )}
+        </div>
 
-          <section className="rounded-2xl bg-gray-50 p-4 dark:bg-white/[0.03]">
-            <h4 className="mb-2 font-medium text-gray-800 dark:text-gray-100">筛选、收藏与批量管理</h4>
-            <ul className="list-disc space-y-1 pl-5">
-              <li>搜索框右侧的星标用于“只看收藏”。卡片或详情页里的星标可以收藏/取消收藏任务。</li>
-              <li>桌面端可拖拽框选任务，也可以按住 Ctrl/⌘ 后点击卡片进行多选。</li>
-              <li>手机端在历史卡片上左右滑动即可选择/取消选择；选中后底部会出现批量操作栏。</li>
-              <li>批量操作栏支持全选当前可见内容、导出、收藏、取消收藏或删除选中任务。</li>
-              <li>admin 用户可以在顶部筛选不同用户，并管理所有用户的图片任务。</li>
-            </ul>
-          </section>
-
-          <section className="rounded-2xl bg-gray-50 p-4 dark:bg-white/[0.03]">
-            <h4 className="mb-2 font-medium text-gray-800 dark:text-gray-100">实际参数追踪</h4>
-            <ul className="list-disc space-y-1 pl-5">
-              <li>接口返回的实际尺寸、质量、格式、数量等会记录到任务里。</li>
-              <li>如果实际值和请求值不同，卡片和详情页会用黄色标签提示。</li>
-              <li>如果接口返回了改写后的提示词，详情页会单独显示，方便判断上游是否改写了输入。</li>
-            </ul>
-          </section>
-
-          <section className="rounded-2xl bg-gray-50 p-4 dark:bg-white/[0.03]">
-            <h4 className="mb-2 font-medium text-gray-800 dark:text-gray-100">API 模式</h4>
-            <p>
-              设置里可以在 Images API 和 Responses API 之间切换。默认保持 Images API；如果你的上游接口要求
-              <code className="mx-1 rounded bg-gray-100 px-1 py-0.5 text-xs dark:bg-white/[0.06]">/v1/responses</code>
-              和 <code className="mx-1 rounded bg-gray-100 px-1 py-0.5 text-xs dark:bg-white/[0.06]">image_generation</code>
-              工具，就切到 Responses API。
-            </p>
-          </section>
+        <div className="pt-4 border-t border-gray-200 dark:border-white/[0.08] flex justify-center">
+          <a
+            href="https://github.com/CookSleep/gpt_image_playground"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-2 text-sm font-medium text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 transition-colors group"
+          >
+            <svg className="w-5 h-5 group-hover:scale-110 transition-transform" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" />
+            </svg>
+            @CookSleep
+          </a>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   )
 }

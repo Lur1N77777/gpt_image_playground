@@ -53,7 +53,7 @@ export default function Select({ value, onChange, options, disabled, className }
         ref={triggerRef}
         onClick={handleToggle}
         className={`flex items-center justify-between gap-1 w-full cursor-pointer select-none ${className ?? ''} ${
-          disabled ? '!opacity-50 !cursor-not-allowed !bg-gray-100/50 dark:!bg-white/[0.02]' : ''
+          disabled ? '!opacity-50 !cursor-not-allowed !bg-gray-100/50 dark:!bg-white/[0.05]' : ''
         }`}
       >
         <span className="truncate">{selectedOption?.selectedLabel ?? selectedOption?.label ?? value}</span>

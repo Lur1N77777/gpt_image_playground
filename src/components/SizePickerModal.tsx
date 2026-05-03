@@ -1,7 +1,9 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { calculateImageSize, normalizeImageSize, parseRatio, type SizeTier } from '../lib/size'
+import ViewportTooltip from './ViewportTooltip'
 
 const TIERS: SizeTier[] = ['1K', '2K', '4K']
+const SIZE_LIMIT_TEXT = '由于模型限制，最终输出会自动规整到合法尺寸：宽高均为 16 的倍数，最大边长 3840px，宽高比不超过 3:1，总像素限制为 655360-8294400。'
 const RATIOS = [
   { label: '1:1', value: '1:1' },
   { label: '3:2', value: '3:2' },
@@ -17,6 +19,7 @@ interface Props {
   currentSize: string
   onSelect: (size: string) => void
   onClose: () => void
+  allowAuto?: boolean
 }
 
 type Mode = 'auto' | 'ratio' | 'resolution'
@@ -39,26 +42,39 @@ function findPresetForSize(size: string) {
   return null
 }
 
-export default function SizePickerModal({ currentSize, onSelect, onClose }: Props) {
+export default function SizePickerModal({ currentSize, onSelect, onClose, allowAuto = true }: Props) {
   const currentPreset = findPresetForSize(currentSize)
   const currentParsedSize = parseSize(currentSize)
   const [mode, setMode] = useState<Mode>(() => {
-    if (!currentSize || currentSize === 'auto') return 'auto'
+    if (!currentSize || currentSize === 'auto') return allowAuto ? 'auto' : 'ratio'
     if (currentPreset) return 'ratio'
     return 'resolution'
   })
 
   // Ratio mode state
   const [tier, setTier] = useState<SizeTier>(currentPreset?.tier ?? '1K')
-  const [ratio, setRatio] = useState(currentPreset?.ratio ?? '1:1')
+  const [ratio, setRatio] = useState(currentPreset?.ratio ?? (allowAuto ? '1:1' : '4:3'))
   const [customRatio, setCustomRatio] = useState('16:9')
 
   // Resolution mode state
   const [customW, setCustomW] = useState(currentParsedSize?.width ?? '1024')
   const [customH, setCustomH] = useState(currentParsedSize?.height ?? '1024')
 
+  const [hintVisible, setHintVisible] = useState(false)
+  const hintTimerRef = useRef<number | null>(null)
+
+  useEffect(() => () => {
+    if (hintTimerRef.current != null) window.clearTimeout(hintTimerRef.current)
+  }, [])
+
   const activeRatio = ratio === 'custom' ? customRatio : ratio
-  const customRatioValid = ratio !== 'custom' || Boolean(parseRatio(customRatio))
+  const parsedCustomRatio = parseRatio(customRatio)
+  const customRatioValid = ratio !== 'custom' || Boolean(parsedCustomRatio)
+  const customRatioClamped = Boolean(
+    ratio === 'custom' &&
+    parsedCustomRatio &&
+    Math.max(parsedCustomRatio.width, parsedCustomRatio.height) / Math.min(parsedCustomRatio.width, parsedCustomRatio.height) > 3,
+  )
 
   const previewSize = useMemo(() => {
     if (mode === 'auto') return 'auto'
@@ -80,6 +96,37 @@ export default function SizePickerModal({ currentSize, onSelect, onClose }: Prop
     return ''
   }, [mode, tier, activeRatio, customW, customH])
 
+  const isClamped = useMemo(() => {
+    if (!previewSize || previewSize === 'auto') return false
+    if (mode === 'ratio' && ratio === 'custom') return customRatioClamped
+    if (mode === 'resolution') {
+      const w = parseInt(customW, 10)
+      const h = parseInt(customH, 10)
+      if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
+        return `${w}x${h}` !== previewSize
+      }
+    }
+    return false
+  }, [mode, ratio, customRatioClamped, customW, customH, previewSize])
+
+  const showHint = () => setHintVisible(true)
+  const hideHint = () => {
+    setHintVisible(false)
+    clearHintTimer()
+  }
+  const clearHintTimer = () => {
+    if (hintTimerRef.current != null) {
+      window.clearTimeout(hintTimerRef.current)
+      hintTimerRef.current = null
+    }
+  }
+  const startHintTouch = () => {
+    hintTimerRef.current = window.setTimeout(() => {
+      setHintVisible(true)
+      hintTimerRef.current = null
+    }, 450)
+  }
+
   const applySize = () => {
     if (!previewSize) return
     onSelect(previewSize)
@@ -94,7 +141,7 @@ export default function SizePickerModal({ currentSize, onSelect, onClose }: Prop
   }
 
   return (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center p-4" onClick={onClose}>
+    <div data-no-drag-select className="fixed inset-0 z-[70] flex items-center justify-center p-4" onClick={onClose}>
       <div className="absolute inset-0 bg-black/30 backdrop-blur-sm animate-overlay-in" />
       <div
         className="relative z-10 w-full max-w-md rounded-3xl border border-white/50 bg-white/95 p-5 shadow-2xl ring-1 ring-black/5 animate-modal-in dark:border-white/[0.08] dark:bg-gray-900/95 dark:ring-white/10"
@@ -118,12 +165,14 @@ export default function SizePickerModal({ currentSize, onSelect, onClose }: Prop
 
         <div className="space-y-6">
           <div className="flex rounded-xl bg-gray-100/80 p-1 dark:bg-white/[0.04]">
-            <button
-              onClick={() => setMode('auto')}
-              className={`flex-1 rounded-lg py-1.5 text-sm font-medium transition ${mode === 'auto' ? 'bg-white text-gray-800 shadow-sm dark:bg-gray-700 dark:text-gray-100' : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'}`}
-            >
-              自动
-            </button>
+            {allowAuto && (
+              <button
+                onClick={() => setMode('auto')}
+                className={`flex-1 rounded-lg py-1.5 text-sm font-medium transition ${mode === 'auto' ? 'bg-white text-gray-800 shadow-sm dark:bg-gray-700 dark:text-gray-100' : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'}`}
+              >
+                自动
+              </button>
+            )}
             <button
               onClick={() => setMode('ratio')}
               className={`flex-1 rounded-lg py-1.5 text-sm font-medium transition ${mode === 'ratio' ? 'bg-white text-gray-800 shadow-sm dark:bg-gray-700 dark:text-gray-100' : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'}`}
@@ -235,7 +284,7 @@ export default function SizePickerModal({ currentSize, onSelect, onClose }: Prop
                     <svg className="mt-0.5 h-4 w-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                     </svg>
-                    <span>由于模型限制，最终输出将被自动规整到 16 的倍数。</span>
+                    <span>{SIZE_LIMIT_TEXT}</span>
                   </p>
                 </div>
               </div>
@@ -244,8 +293,28 @@ export default function SizePickerModal({ currentSize, onSelect, onClose }: Prop
 
           <div className="rounded-2xl bg-gray-50 px-4 py-3 dark:bg-white/[0.03]">
             <div className="text-xs text-gray-400 dark:text-gray-500">将使用</div>
-            <div className="mt-1 font-mono text-lg font-semibold text-gray-800 dark:text-gray-100">
-              {previewSize || '尺寸无效'}
+            <div className="mt-1 flex items-center gap-2">
+              <span className="font-mono text-lg font-semibold text-gray-800 dark:text-gray-100">
+                {previewSize || '尺寸无效'}
+              </span>
+              {isClamped && (
+                <div
+                  className="relative flex items-center"
+                  onMouseEnter={showHint}
+                  onMouseLeave={hideHint}
+                  onTouchStart={startHintTouch}
+                  onTouchEnd={clearHintTimer}
+                  onTouchCancel={hideHint}
+                  onClick={showHint}
+                >
+                  <svg className="w-5 h-5 text-yellow-500 cursor-pointer" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                  <ViewportTooltip visible={hintVisible} className="w-56 whitespace-normal text-center">
+                    {SIZE_LIMIT_TEXT}
+                  </ViewportTooltip>
+                </div>
+              )}
             </div>
           </div>
         </div>

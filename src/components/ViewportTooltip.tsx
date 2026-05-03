@@ -19,7 +19,6 @@ export default function ViewportTooltip({ visible, children, className = '' }: V
     const updatePosition = () => {
       const el = tooltipRef.current
       if (!el) return
-
       const margin = 8
       const rect = el.getBoundingClientRect()
       if (rect.left < margin) {
