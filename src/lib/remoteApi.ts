@@ -77,21 +77,42 @@ function buildBackendApiUrl(path: string): string {
 }
 
 async function readJsonResponse<T>(response: Response): Promise<T> {
-  if (response.ok) return response.json() as Promise<T>
+  const contentType = response.headers.get('Content-Type') || ''
+  let bodyText = ''
+  try {
+    bodyText = await response.text()
+  } catch {
+    throw new Error(`HTTP ${response.status}：无法读取响应体`)
+  }
+
+  const trimmed = bodyText.trim()
+  const looksLikeJson = contentType.includes('application/json') || trimmed.startsWith('{') || trimmed.startsWith('[')
+
+  if (!looksLikeJson) {
+    const preview = trimmed.slice(0, 300).replace(/\s+/g, ' ')
+    const isHtml = /^<(?:!doctype|html|head|body)/i.test(trimmed)
+    const hint = isHtml
+      ? '后端返回了 HTML 而非 JSON（很可能是 Cloudflare 错误页或登录页）'
+      : '后端返回了非 JSON 响应'
+    throw new Error(
+      `${hint}。HTTP ${response.status}，Content-Type: ${contentType || '(空)'}，响应预览: ${preview}`,
+    )
+  }
+
+  let payload: unknown
+  try {
+    payload = JSON.parse(bodyText)
+  } catch {
+    throw new Error(`JSON 解析失败 (HTTP ${response.status}): ${bodyText.slice(0, 200)}`)
+  }
+
+  if (response.ok) return payload as T
 
   let message = `HTTP ${response.status}`
-  try {
-    const payload = await response.json() as { error?: string | { message?: string }, message?: string }
-    if (typeof payload.error === 'string') message = payload.error
-    else if (payload.error?.message) message = payload.error.message
-    else if (payload.message) message = payload.message
-  } catch {
-    try {
-      message = await response.text()
-    } catch {
-      /* ignore */
-    }
-  }
+  const errorPayload = payload as { error?: string | { message?: string }, message?: string } | null
+  if (typeof errorPayload?.error === 'string') message = errorPayload.error
+  else if (errorPayload?.error && typeof errorPayload.error === 'object' && errorPayload.error.message) message = errorPayload.error.message
+  else if (errorPayload?.message) message = errorPayload.message
 
   throw new Error(message)
 }

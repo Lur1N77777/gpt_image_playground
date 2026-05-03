@@ -92,100 +92,155 @@ export async function onRequest(context: PagesContext): Promise<Response> {
 
   if (request.method === 'OPTIONS') return optionsResponse()
 
-  const user = await authenticateRequest(request, env)
-  if (isAuthError(user)) return user
-
-  if (request.method === 'GET') {
-    return jsonResponse({ jobs: await listJobs(env, user) })
-  }
-
-  if (request.method !== 'POST') {
-    return jsonResponse({ error: 'Only GET and POST requests are supported.' }, 405)
-  }
-
-  if (!env.IMAGE_QUEUE) {
-    return jsonResponse({ error: 'IMAGE_QUEUE is not configured.' }, 500)
-  }
-
-  let body: CreateJobRequest
+  let step = 'authenticate'
   try {
-    body = await request.json() as CreateJobRequest
-  } catch {
-    return jsonResponse({ error: 'Invalid JSON request body.' }, 400)
+    const user = await authenticateRequest(request, env)
+    if (isAuthError(user)) return user
+
+    if (request.method === 'GET') {
+      step = 'list-jobs'
+      return jsonResponse({ jobs: await listJobs(env, user) })
+    }
+
+    if (request.method !== 'POST') {
+      return jsonResponse({ error: 'Only GET and POST requests are supported.' }, 405)
+    }
+
+    if (!env.IMAGE_QUEUE) {
+      return jsonResponse({ error: 'IMAGE_QUEUE is not configured.' }, 500)
+    }
+    if (!env.IMAGE_BUCKET) {
+      return jsonResponse({ error: 'IMAGE_BUCKET (R2) is not configured. 请在 Pages 项目的 Settings → Functions → R2 bucket bindings 中添加 IMAGE_BUCKET 绑定。' }, 500)
+    }
+    if (!env.IMAGE_DB) {
+      return jsonResponse({ error: 'IMAGE_DB (D1) is not configured.' }, 500)
+    }
+
+    step = 'parse-body'
+    let body: CreateJobRequest
+    try {
+      body = await request.json() as CreateJobRequest
+    } catch {
+      return jsonResponse({ error: 'Invalid JSON request body.' }, 400)
+    }
+
+    const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : ''
+    const inputImageDataUrls = Array.isArray(body.inputImageDataUrls)
+      ? body.inputImageDataUrls.filter((value): value is string => typeof value === 'string')
+      : []
+    const maskDataUrl = typeof body.maskDataUrl === 'string' && body.maskDataUrl.trim()
+      ? body.maskDataUrl
+      : undefined
+
+    if (!prompt && inputImageDataUrls.length === 0) {
+      return jsonResponse({ error: '请输入提示词或添加参考图。' }, 400)
+    }
+
+    if (maskDataUrl && inputImageDataUrls.length === 0) {
+      return jsonResponse({ error: '遮罩编辑需要至少一张参考图。' }, 400)
+    }
+
+    if (inputImageDataUrls.length > 16) {
+      return jsonResponse({ error: '最多支持 16 张参考图。' }, 400)
+    }
+
+    const now = Date.now()
+    const jobId = crypto.randomUUID()
+    const inputImageKeys: string[] = []
+
+    for (let i = 0; i < inputImageDataUrls.length; i++) {
+      step = `decode-input-image-${i + 1}`
+      let bytes: Uint8Array
+      let mime: string
+      try {
+        ;({ bytes, mime } = decodeDataUrl(inputImageDataUrls[i]))
+      } catch (err) {
+        return jsonResponse({ error: `参考图 #${i + 1} 解码失败：${err instanceof Error ? err.message : String(err)}` }, 400)
+      }
+      const ext = extensionFromMime(mime)
+      const key = `jobs/${jobId}/inputs/input-${i + 1}.${ext}`
+      step = `r2-put-input-${i + 1} (size=${bytes.byteLength})`
+      try {
+        await env.IMAGE_BUCKET.put(key, bytes, {
+          httpMetadata: { contentType: mime },
+          customMetadata: { source: 'upload' },
+        })
+      } catch (err) {
+        return jsonResponse({
+          error: `R2 上传参考图 #${i + 1} 失败 (key=${key}, size=${bytes.byteLength} bytes): ${err instanceof Error ? err.message : String(err)}`,
+        }, 500)
+      }
+      inputImageKeys.push(key)
+    }
+
+    let maskImageKey: string | null = null
+    const maskTargetImageKey = maskDataUrl ? inputImageKeys[0] ?? null : null
+    if (maskDataUrl) {
+      step = 'decode-mask'
+      let bytes: Uint8Array
+      let mime: string
+      try {
+        ;({ bytes, mime } = decodeDataUrl(maskDataUrl))
+      } catch (err) {
+        return jsonResponse({ error: `遮罩解码失败：${err instanceof Error ? err.message : String(err)}` }, 400)
+      }
+      const ext = extensionFromMime(mime)
+      maskImageKey = `jobs/${jobId}/mask/mask.${ext}`
+      step = `r2-put-mask (size=${bytes.byteLength})`
+      try {
+        await env.IMAGE_BUCKET.put(maskImageKey, bytes, {
+          httpMetadata: { contentType: mime },
+          customMetadata: { source: 'mask' },
+        })
+      } catch (err) {
+        return jsonResponse({
+          error: `R2 上传遮罩失败 (key=${maskImageKey}, size=${bytes.byteLength} bytes): ${err instanceof Error ? err.message : String(err)}`,
+        }, 500)
+      }
+    }
+
+    const codexCli = body.codexCli === true
+    const params = normalizeParams(body.params, codexCli)
+    const apiMode = normalizeApiMode(body.apiMode)
+    const model = typeof body.model === 'string' && body.model.trim()
+      ? body.model.trim()
+      : apiMode === 'responses'
+        ? DEFAULT_RESPONSES_MODEL
+        : DEFAULT_MODEL
+
+    step = 'd1-insert-job'
+    try {
+      await insertJob(env, {
+        id: jobId,
+        userId: user.id,
+        prompt,
+        params,
+        model,
+        apiMode,
+        codexCli,
+        inputImageKeys,
+        maskTargetImageKey,
+        maskImageKey,
+        now,
+      })
+    } catch (err) {
+      return jsonResponse({ error: `D1 写入任务失败：${err instanceof Error ? err.message : String(err)}` }, 500)
+    }
+
+    step = 'queue-send'
+    try {
+      await env.IMAGE_QUEUE.send({ jobId, upstream: sanitizeUpstream(body.upstream) })
+    } catch (err) {
+      return jsonResponse({ error: `Queue 发送失败：${err instanceof Error ? err.message : String(err)}` }, 500)
+    }
+
+    step = 'd1-get-job'
+    const row = await getJob(env, jobId)
+    return jsonResponse({ job: row ? rowToRemoteJob(row) : null }, 202)
+  } catch (err) {
+    return jsonResponse({
+      error: `任务处理失败 [step=${step}]：${err instanceof Error ? err.message : String(err)}`,
+      stack: err instanceof Error ? err.stack?.split('\n').slice(0, 5).join('\n') : undefined,
+    }, 500)
   }
-
-  const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : ''
-  const inputImageDataUrls = Array.isArray(body.inputImageDataUrls)
-    ? body.inputImageDataUrls.filter((value): value is string => typeof value === 'string')
-    : []
-  const maskDataUrl = typeof body.maskDataUrl === 'string' && body.maskDataUrl.trim()
-    ? body.maskDataUrl
-    : undefined
-
-  if (!prompt && inputImageDataUrls.length === 0) {
-    return jsonResponse({ error: '请输入提示词或添加参考图。' }, 400)
-  }
-
-  if (maskDataUrl && inputImageDataUrls.length === 0) {
-    return jsonResponse({ error: '遮罩编辑需要至少一张参考图。' }, 400)
-  }
-
-  if (inputImageDataUrls.length > 16) {
-    return jsonResponse({ error: '最多支持 16 张参考图。' }, 400)
-  }
-
-  const now = Date.now()
-  const jobId = crypto.randomUUID()
-  const inputImageKeys: string[] = []
-
-  for (let i = 0; i < inputImageDataUrls.length; i++) {
-    const { bytes, mime } = decodeDataUrl(inputImageDataUrls[i])
-    const ext = extensionFromMime(mime)
-    const key = `jobs/${jobId}/inputs/input-${i + 1}.${ext}`
-    await env.IMAGE_BUCKET.put(key, bytes, {
-      httpMetadata: { contentType: mime },
-      customMetadata: { source: 'upload' },
-    })
-    inputImageKeys.push(key)
-  }
-
-  let maskImageKey: string | null = null
-  const maskTargetImageKey = maskDataUrl ? inputImageKeys[0] ?? null : null
-  if (maskDataUrl) {
-    const { bytes, mime } = decodeDataUrl(maskDataUrl)
-    const ext = extensionFromMime(mime)
-    maskImageKey = `jobs/${jobId}/mask/mask.${ext}`
-    await env.IMAGE_BUCKET.put(maskImageKey, bytes, {
-      httpMetadata: { contentType: mime },
-      customMetadata: { source: 'mask' },
-    })
-  }
-
-  const codexCli = body.codexCli === true
-  const params = normalizeParams(body.params, codexCli)
-  const apiMode = normalizeApiMode(body.apiMode)
-  const model = typeof body.model === 'string' && body.model.trim()
-    ? body.model.trim()
-    : apiMode === 'responses'
-      ? DEFAULT_RESPONSES_MODEL
-      : DEFAULT_MODEL
-
-  await insertJob(env, {
-    id: jobId,
-    userId: user.id,
-    prompt,
-    params,
-    model,
-    apiMode,
-    codexCli,
-    inputImageKeys,
-    maskTargetImageKey,
-    maskImageKey,
-    now,
-  })
-
-  await env.IMAGE_QUEUE.send({ jobId, upstream: sanitizeUpstream(body.upstream) })
-
-  const row = await getJob(env, jobId)
-  return jsonResponse({ job: row ? rowToRemoteJob(row) : null }, 202)
 }
